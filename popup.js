@@ -1,19 +1,37 @@
-const fileInput = document.getElementById("fileInput");
-const openBtn = document.getElementById("openBtn");
+document.addEventListener("DOMContentLoaded", () => {
+  const fileInput = document.getElementById("fileInput");
+  const openBtn = document.getElementById("openBtn");
 
-let file;
+  let file = null;
+  let busy = false;
 
-fileInput.addEventListener("change", e => {
-  file = e.target.files[0];
-  openBtn.disabled = !file;
-});
+  openBtn.disabled = true;
 
-openBtn.addEventListener("click", async () => {
-  const arrayBuffer = await file.arrayBuffer();
-  const base64 = btoa(
-    String.fromCharCode(...new Uint8Array(arrayBuffer))
-  );
+  fileInput.addEventListener("change", (e) => {
+    file = e.target.files?.[0] || null;
+    openBtn.disabled = !file;
+  });
 
-  const url = chrome.runtime.getURL("viewer.html") + `#${base64}`;
-  chrome.tabs.create({ url });
+  openBtn.addEventListener("click", async () => {
+    if (!file || busy) return;
+    busy = true;
+    openBtn.disabled = true;
+
+    try {
+      const buffer = await file.arrayBuffer();
+      const token = crypto.randomUUID();
+
+      await chrome.storage.session.set({
+        [token]: buffer
+      });
+
+      const url =
+        chrome.runtime.getURL("viewer.html") + `#${token}`;
+      chrome.tabs.create({ url });
+    } catch (err) {
+      console.error("Failed to open PDF:", err);
+      busy = false;
+      openBtn.disabled = false;
+    }
+  });
 });

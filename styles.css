@@ -14,12 +14,61 @@ body {
   position: sticky;
   top: 0;
   z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+
   padding: 10px 14px;
   background: #111;
   color: #fff;
-  font-size: 14px;
-  line-height: 1.4;
+  font-size: 13px;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
 }
+
+#stats-left {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 240px;
+}
+
+#status-text {
+  font-weight: 500;
+}
+
+#progress-wrap {
+  width: 240px;
+  height: 6px;
+  background: #333;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+#progress-bar {
+  height: 100%;
+  width: 0%;
+  background: #4caf50;
+  transition: width 0.25s ease;
+}
+
+#stats-center {
+  display: flex;
+  gap: 16px;
+  white-space: nowrap;
+  opacity: 0.9;
+}
+
+#stats-right {
+  white-space: nowrap;
+  opacity: 0.8;
+}
+
+#stats-right .version {
+  opacity: 0.6;
+  margin-left: 4px;
+}
+
 
 /* ===== PDF Container ===== */
 

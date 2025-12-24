@@ -1,47 +1,102 @@
+/* viewer.js — Please Tell Me (MV3-safe, no base64)
+   - Loads PDF bytes from chrome.storage.session via URL hash token
+   - Renders all pages
+   - Detects potential "redactions" as ANY overlay:
+       * PDF annotations (rect-based)
+       * Canvas vector fills (fillRect) with effective alpha > threshold
+       * Canvas bitmaps (drawImage)
+   - Positions overlays correctly by mapping through ctx.getTransform()
+   - Progress + counters in stats bar, brand/version on right
+*/
+
 console.log("viewer.js loaded");
 
-// ================================
-// PDF.js worker configuration
-// ================================
+// =============================
+// Config
+// =============================
+const APP_NAME = "Please Tell Me";
+const VERSION = "v0.1";
+const SCALE = 1.5;
+
+// Ignore near-invisible draws (effective alpha below this)
+const MIN_EFFECTIVE_ALPHA = 0.10;
+
+// PDF.js worker
 pdfjsLib.GlobalWorkerOptions.workerSrc = chrome.runtime.getURL(
   "pdfjs/pdf.worker.min.js"
 );
 
-// ================================
-// Decode PDF from URL hash
-// ================================
-const base64 = location.hash.substring(1);
-const pdfContainer = document.getElementById("pdf");
+// =============================
+// DOM
+// =============================
 const statsEl = document.getElementById("stats");
+const pdfContainer = document.getElementById("pdf");
 
-if (!base64) {
-  statsEl.textContent = "No PDF data found in URL. Upload a PDF first.";
-  throw new Error("Missing PDF hash data");
+if (!statsEl || !pdfContainer) {
+  throw new Error("viewer.html must contain #stats and #pdf elements");
 }
 
-const pdfData = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+// -----------------------------
+// Stats UI (expects your viewer.html structure; will populate it if present)
+// -----------------------------
+function setStatus(text) {
+  const el = document.getElementById("status-text");
+  if (el) el.textContent = text;
+}
 
-// ================================
+function setProgressBar(pct) {
+  const bar = document.getElementById("progress-bar");
+  if (bar) bar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+}
+
+function setCounts({ annotations, vectors, images }) {
+  const a = document.getElementById("count-annotations");
+  const v = document.getElementById("count-vectors");
+  const i = document.getElementById("count-images");
+  if (a) a.textContent = `Annotations: ${annotations}`;
+  if (v) v.textContent = `Vectors: ${vectors}`;
+  if (i) i.textContent = `Images: ${images}`;
+}
+
+function setBrandRight() {
+  const right = document.getElementById("stats-right");
+  if (right) {
+    right.innerHTML = `${APP_NAME} <span class="version">${VERSION}</span>`;
+  }
+}
+
+function setFinalTotals({ totalRedactions, recoverable }) {
+  const pct = totalRedactions ? Math.round((recoverable / totalRedactions) * 100) : 0;
+
+  // Keep your existing layout: left has status/progress, center has counts.
+  // We’ll put totals into the center line by appending if you want,
+  // but safest: update status to include totals.
+  setStatus(`Analysis complete`);
+  setProgressBar(100);
+
+  // If you want totals visible (recommended), we’ll inject into stats-center as a single text node.
+  const center = document.getElementById("stats-center");
+  if (center) {
+    // Preserve the three spans, then append totals after them.
+    let totalsEl = document.getElementById("ptm-totals");
+    if (!totalsEl) {
+      totalsEl = document.createElement("span");
+      totalsEl.id = "ptm-totals";
+      totalsEl.style.marginLeft = "14px";
+      center.appendChild(totalsEl);
+    }
+    totalsEl.textContent = `Redactions: ${totalRedactions} · Recoverable: ${recoverable} · Recovery: ${pct}%`;
+  }
+}
+
+// Let UI paint between heavy steps
+function nextFrame() {
+  return new Promise((r) => requestAnimationFrame(() => r()));
+}
+
+// =============================
 // Geometry helpers
-// ================================
-function rectFromPoints(p) {
-  const xs = p.map((q) => q.x);
-  const ys = p.map((q) => q.y);
-  const minX = Math.min(...xs);
-  const minY = Math.min(...ys);
-  const maxX = Math.max(...xs);
-  const maxY = Math.max(...ys);
-  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
-}
-
-function clampRect(r, viewport) {
-  const x = Math.max(0, Math.min(r.x, viewport.width));
-  const y = Math.max(0, Math.min(r.y, viewport.height));
-  const right = Math.max(0, Math.min(r.x + r.width, viewport.width));
-  const bottom = Math.max(0, Math.min(r.y + r.height, viewport.height));
-  return { x, y, width: Math.max(0, right - x), height: Math.max(0, bottom - y) };
-}
-
+// =============================
 function boxesIntersect(a, b) {
   return !(
     a.x + a.width <= b.x ||
@@ -49,6 +104,29 @@ function boxesIntersect(a, b) {
     a.y + a.height <= b.y ||
     b.y + b.height <= a.y
   );
+}
+
+function clampRect(r, viewport) {
+  const x = Math.max(0, Math.min(r.x, viewport.width));
+  const y = Math.max(0, Math.min(r.y, viewport.height));
+  const right = Math.max(0, Math.min(r.x + r.width, viewport.width));
+  const bottom = Math.max(0, Math.min(r.y + r.height, viewport.height));
+  return {
+    x,
+    y,
+    width: Math.max(0, right - x),
+    height: Math.max(0, bottom - y),
+  };
+}
+
+function rectFromPoints(points) {
+  const xs = points.map((p) => p.x);
+  const ys = points.map((p) => p.y);
+  const minX = Math.min(...xs);
+  const minY = Math.min(...ys);
+  const maxX = Math.max(...xs);
+  const maxY = Math.max(...ys);
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
 function approxEqual(a, b, eps = 1.5) {
@@ -70,69 +148,102 @@ function dedupeRegions(regions) {
   return out;
 }
 
-// Ignore obvious page background / layout blocks
+// Filters to avoid giant “layout/background” overlays
 function looksLikeLayout(r, viewport) {
   const pageArea = viewport.width * viewport.height;
   const area = r.width * r.height;
 
-  // too tiny => noise
-  if (r.width < 12 || r.height < 8) return true;
+  // Noise
+  if (r.width < 10 || r.height < 8) return true;
 
-  // huge => likely background/container
-  if (area / pageArea > 0.30) return true;
+  // Huge background/container
+  if (area / pageArea > 0.35) return true;
 
-  // spans almost entire width/height => likely layout
+  // Near full-page spans
   if (r.width > viewport.width * 0.95) return true;
   if (r.height > viewport.height * 0.95) return true;
 
   return false;
 }
 
-// ================================
-// Capture overlays from canvas ops
-// (images, stickers, emojis, pasted shapes, etc.)
-// ================================
-function installOverlayCapture(ctx, overlayRegions, viewport) {
-  // Transform a point with DOMMatrix (current canvas transform)
-  function applyMatrix(m, x, y) {
-    // DOMMatrix: a,b,c,d,e,f
-    return { x: m.a * x + m.c * y + m.e, y: m.b * x + m.d * y + m.f };
+// =============================
+// Alpha helpers (vector opacity)
+// =============================
+function parseCssAlpha(style) {
+  // Handles: rgba(r,g,b,a) and rgb(r,g,b)
+  if (!style || typeof style !== "string") return 1;
+  const s = style.trim().toLowerCase();
+  if (s.startsWith("rgba(")) {
+    const inside = s.slice(5, -1);
+    const parts = inside.split(",").map((p) => p.trim());
+    const a = parseFloat(parts[3]);
+    return Number.isFinite(a) ? a : 1;
+  }
+  // rgb(...) => alpha 1
+  return 1;
+}
+
+function effectiveAlpha(ctx, styleAlpha = 1) {
+  const ga = typeof ctx.globalAlpha === "number" ? ctx.globalAlpha : 1;
+  return ga * styleAlpha;
+}
+
+// =============================
+// Detection: Annotations (rects)
+// =============================
+async function getAnnotationRegions(page, viewport) {
+  const regions = [];
+  const annotations = await page.getAnnotations();
+
+  for (const ann of annotations) {
+    if (!ann.rect || !Array.isArray(ann.rect) || ann.rect.length !== 4) continue;
+
+    const [x1, y1, x2, y2] = ann.rect;
+
+    // PDF space -> viewport space
+    const p1 = pdfjsLib.Util.transform(viewport.transform, [1, 0, 0, 1, x1, y1]);
+    const p2 = pdfjsLib.Util.transform(viewport.transform, [1, 0, 0, 1, x2, y2]);
+
+    const r = clampRect(
+      rectFromPoints([{ x: p1[4], y: p1[5] }, { x: p2[4], y: p2[5] }]),
+      viewport
+    );
+
+    if (!looksLikeLayout(r, viewport)) regions.push(r);
   }
 
-  // Capture a destination rect in *canvas coordinates*
-  function captureDestRect(dx, dy, dw, dh, kind) {
-    // guard
-    if (!Number.isFinite(dx) || !Number.isFinite(dy) || !Number.isFinite(dw) || !Number.isFinite(dh)) return;
-    if (dw <= 0 || dh <= 0) return;
+  return dedupeRegions(regions);
+}
 
-    const alpha = typeof ctx.globalAlpha === "number" ? ctx.globalAlpha : 1;
-    // If you truly want ANY overlay even if transparent, drop this threshold to 0.
-    // For now: ignore near-invisible draws.
-    if (alpha < 0.05) return;
+// =============================
+// Detection: Canvas overlays (bitmaps + fillRect) with proper transform mapping
+// =============================
+function installCanvasOverlayCapture(ctx, viewport, overlayRegions, counts) {
+  const origDrawImage = ctx.drawImage.bind(ctx);
+  const origFillRect = ctx.fillRect.bind(ctx);
 
+  function mapRectThroughTransform(x, y, w, h) {
     const m = ctx.getTransform ? ctx.getTransform() : null;
+    if (!m) return clampRect({ x, y, width: w, height: h }, viewport);
 
-    let r;
-    if (m) {
-      const p1 = applyMatrix(m, dx, dy);
-      const p2 = applyMatrix(m, dx + dw, dy);
-      const p3 = applyMatrix(m, dx + dw, dy + dh);
-      const p4 = applyMatrix(m, dx, dy + dh);
-      r = rectFromPoints([p1, p2, p3, p4]);
-    } else {
-      // fallback: no transform support
-      r = { x: dx, y: dy, width: dw, height: dh };
-    }
+    const p1 = { x: m.a * x + m.c * y + m.e, y: m.b * x + m.d * y + m.f };
+    const p2 = { x: m.a * (x + w) + m.c * y + m.e, y: m.b * (x + w) + m.d * y + m.f };
+    const p3 = { x: m.a * (x + w) + m.c * (y + h) + m.e, y: m.b * (x + w) + m.d * (y + h) + m.f };
+    const p4 = { x: m.a * x + m.c * (y + h) + m.e, y: m.b * x + m.d * (y + h) + m.f };
 
-    r = clampRect(r, viewport);
-    if (r.width < 12 || r.height < 8) return;
+    const r = clampRect(rectFromPoints([p1, p2, p3, p4]), viewport);
+    return r;
+  }
+
+  function addRegion(r, kind, effA) {
+    if (!r || r.width <= 0 || r.height <= 0) return;
     if (looksLikeLayout(r, viewport)) return;
 
-    overlayRegions.push({ ...r, alpha, kind });
+    overlayRegions.push({ ...r, kind, alpha: effA });
+    if (kind === "image") counts.images++;
+    if (kind === "vector") counts.vectors++;
   }
 
-  // --- Hook drawImage ---
-  const origDrawImage = ctx.drawImage.bind(ctx);
   ctx.drawImage = (...args) => {
     try {
       // drawImage(img, dx, dy)
@@ -158,44 +269,89 @@ function installOverlayCapture(ctx, overlayRegions, viewport) {
         dh = args[8];
       }
 
-      captureDestRect(dx, dy, dw, dh, "image");
-    } catch (e) {
-      // swallow capture errors; never break render
+      // Ignore tiny icons
+      if (dw >= 12 && dh >= 8) {
+        // Images have no fillStyle alpha; just globalAlpha
+        const effA = effectiveAlpha(ctx, 1);
+        if (effA >= MIN_EFFECTIVE_ALPHA) {
+          const r = mapRectThroughTransform(dx, dy, dw, dh);
+          addRegion(r, "image", effA);
+        }
+      }
+    } catch (_) {
+      // never break render
     }
-
     return origDrawImage(...args);
   };
 
-  // --- Hook fillRect (covers some “fat marker” / simple blocks) ---
-  const origFillRect = ctx.fillRect.bind(ctx);
   ctx.fillRect = (x, y, w, h) => {
     try {
-      // If you want to skip fully transparent fills, keep alpha threshold in captureDestRect
-      captureDestRect(x, y, w, h, "fillRect");
-    } catch (e) {}
+      if (w >= 12 && h >= 8) {
+        const styleA = parseCssAlpha(ctx.fillStyle);
+        const effA = effectiveAlpha(ctx, styleA);
+
+        // Only count opaque-ish vector fills
+        if (effA >= MIN_EFFECTIVE_ALPHA) {
+          const r = mapRectThroughTransform(x, y, w, h);
+          addRegion(r, "vector", effA);
+        }
+      }
+    } catch (_) {}
     return origFillRect(x, y, w, h);
   };
 }
 
-// ================================
+// =============================
 // Main
-// ================================
+// =============================
 (async () => {
   try {
-    statsEl.textContent = "Loading PDF…";
+    setBrandRight();
+
+    const token = location.hash.substring(1);
+    if (!token) {
+      setStatus("No document token found. Upload a PDF first.");
+      return;
+    }
+
+    // NOTE: requires "storage" permission in manifest + MV3 session storage
+    const result = await chrome.storage.session.get(token);
+    const pdfData = result[token];
+
+    if (!pdfData) {
+      setStatus("Document expired. Please re-upload.");
+      return;
+    }
+
+    // Free memory immediately
+    chrome.storage.session.remove(token);
+
+    setStatus("Loading PDF…");
+    setProgressBar(2);
+    setCounts({ annotations: 0, vectors: 0, images: 0 });
+    await nextFrame();
 
     const pdf = await pdfjsLib.getDocument({ data: pdfData }).promise;
     console.log("PDF loaded:", pdf.numPages, "pages");
 
-    let total = 0;
+    const totalPages = pdf.numPages;
+
+    let totalRedactions = 0;
     let recoverable = 0;
 
-    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
-      statsEl.textContent = `Rendering page ${pageNum}/${pdf.numPages}…`;
+    let annCount = 0;
+    let vecCount = 0;
+    let imgCount = 0;
+
+    for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
+      const pctPages = Math.round(((pageNum - 1) / totalPages) * 100);
+      setStatus(`Scanning page ${pageNum} of ${totalPages}`);
+      setProgressBar(pctPages);
+      setCounts({ annotations: annCount, vectors: vecCount, images: imgCount });
+      await nextFrame();
 
       const page = await pdf.getPage(pageNum);
-      const scale = 1.5;
-      const viewport = page.getViewport({ scale });
+      const viewport = page.getViewport({ scale: SCALE });
 
       // Page wrapper
       const pageDiv = document.createElement("div");
@@ -208,16 +364,27 @@ function installOverlayCapture(ctx, overlayRegions, viewport) {
       canvas.width = Math.floor(viewport.width);
       canvas.height = Math.floor(viewport.height);
       pageDiv.appendChild(canvas);
+      pdfContainer.appendChild(pageDiv);
 
       const ctx = canvas.getContext("2d");
 
-      // Capture overlays during render
+      // Capture canvas overlays during render
       const overlayRegions = [];
-      installOverlayCapture(ctx, overlayRegions, viewport);
+      const counts = { vectors: 0, images: 0 };
+      installCanvasOverlayCapture(ctx, viewport, overlayRegions, counts);
 
+      // Render page
       await page.render({ canvasContext: ctx, viewport }).promise;
 
-      // Extract text with boxes in viewport/canvas coords
+      // Annotation overlays
+      const annRegions = await getAnnotationRegions(page, viewport);
+      annCount += annRegions.length;
+
+      // Update counters from canvas capture
+      vecCount += counts.vectors;
+      imgCount += counts.images;
+
+      // Extract text boxes in viewport space
       const textContent = await page.getTextContent();
       const textItems = textContent.items
         .filter((item) => item.str && item.str.trim())
@@ -226,8 +393,9 @@ function installOverlayCapture(ctx, overlayRegions, viewport) {
           const x = tx[4];
           const y = tx[5];
 
-          const w = Math.max((item.width || 0) * scale, 1);
-          const h = Math.max((item.height || 0) * scale, 10);
+          // Conservative box sizing
+          const w = Math.max((item.width || 0) * SCALE, 1);
+          const h = Math.max((item.height || 0) * SCALE, 12);
 
           return {
             str: item.str,
@@ -235,37 +403,36 @@ function installOverlayCapture(ctx, overlayRegions, viewport) {
           };
         });
 
-      // Dedupe overlays
-      const regions = dedupeRegions(overlayRegions);
+      // Merge candidates (ANY overlay is a redaction candidate)
+      const merged = dedupeRegions([
+        ...annRegions.map((r) => ({ ...r, kind: "annotation" })),
+        ...overlayRegions.map((r) => ({ x: r.x, y: r.y, width: r.width, height: r.height, kind: r.kind })),
+      ]).filter((r) => !looksLikeLayout(r, viewport));
 
-      console.log(`Page ${pageNum}: captured ${regions.length} overlay regions`);
+      console.log(`Page ${pageNum}: found ${merged.length} redactions`);
 
-      // For each overlay, decide recoverability and render interactive div
-      let pageRedactions = 0;
-
-      for (const r0 of regions) {
-        // Count any overlay as a redaction (your requirement)
-        pageRedactions++;
-        total++;
+      // Render overlays and compute recoverability
+      for (const r of merged) {
+        totalRedactions++;
 
         const el = document.createElement("div");
         el.className = "redaction";
-        el.style.left = `${r0.x}px`;
-        el.style.top = `${r0.y}px`;
-        el.style.width = `${r0.width}px`;
-        el.style.height = `${r0.height}px`;
+        el.style.left = `${r.x}px`;
+        el.style.top = `${r.y}px`;
+        el.style.width = `${r.width}px`;
+        el.style.height = `${r.height}px`;
 
-        const hits = textItems
-          .filter((t) => boxesIntersect(t.box, r0))
+        const hit = textItems
+          .filter((t) => boxesIntersect(t.box, r))
           .map((t) => t.str)
           .join(" ")
           .replace(/\s+/g, " ")
           .trim();
 
-        if (hits) {
+        if (hit) {
           recoverable++;
           el.classList.add("recoverable");
-          el.dataset.text = hits;
+          el.dataset.text = hit;
         } else {
           el.classList.add("unrecoverable");
         }
@@ -273,14 +440,16 @@ function installOverlayCapture(ctx, overlayRegions, viewport) {
         pageDiv.appendChild(el);
       }
 
-      console.log(`Page ${pageNum}: counted ${pageRedactions} redactions`);
-      pdfContainer.appendChild(pageDiv);
+      // Progress update after finishing the page
+      const pctDone = Math.round((pageNum / totalPages) * 100);
+      setProgressBar(pctDone);
+      setCounts({ annotations: annCount, vectors: vecCount, images: imgCount });
+      await nextFrame();
     }
 
-    const pct = total ? Math.round((recoverable / total) * 100) : 0;
-    statsEl.textContent = `Redactions: ${total} | Recoverable: ${recoverable} | Recovery: ${pct}%`;
+    setFinalTotals({ totalRedactions, recoverable });
   } catch (err) {
     console.error("Viewer fatal error:", err);
-    statsEl.textContent = "Error loading PDF (see console)";
+    setStatus("Error loading PDF (see console)");
   }
 })();
