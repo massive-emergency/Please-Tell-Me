@@ -1,0 +1,70 @@
+/* ===== Global ===== */
+
+body {
+  margin: 0;
+  padding: 0;
+  background: #eee;
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+               Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* ===== Stats Bar ===== */
+
+#stats {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  padding: 10px 14px;
+  background: #111;
+  color: #fff;
+  font-size: 14px;
+  line-height: 1.4;
+}
+
+/* ===== PDF Container ===== */
+
+#pdf {
+  padding: 20px;
+}
+
+/* ===== Page Wrapper ===== */
+
+.page {
+  position: relative;
+  margin: 0 auto 28px auto;
+  background: #fff;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+  overflow: visible; /* critical for hover overlays */
+}
+
+/* Ensure canvas fills the page wrapper */
+.page canvas {
+  display: block;
+}
+
+/* ===== Redaction Overlay ===== */
+
+.redaction {
+  position: absolute;
+  background: #000;
+  cursor: pointer;
+}
+
+/* Hover reveal: recoverable text */
+.redaction.recoverable:hover::after {
+  content: attr(data-text);
+  position: absolute;
+  left: 0;
+  top: 0;
+  max-width: 320px;
+  background: #000;
+  color: #fff;
+  padding: 6px 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  z-index: 1000;
+  pointer-events: none;
+}
+
+/* Hover reveal: unrecoverable */

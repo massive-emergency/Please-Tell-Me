@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "Please Tell Me",
+  "short_name": "Please Tell Me",
+  "version": "0.1.0",
+  "description": "Reveal text hidden behind superficial PDF redactions.",
+  "action": {
+    "default_title": "Please Tell Me",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "commands": {
+    "open-upload": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+U",
+        "mac": "Command+Shift+U"
+      },
+      "description": "Upload a PDF to analyze redactions"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "permissions": [],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "viewer.html",
+        "styles.css",
+				"pdfjs/pdf.worker.min.js"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
